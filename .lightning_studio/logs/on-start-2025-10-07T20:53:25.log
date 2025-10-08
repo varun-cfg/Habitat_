@@ -1,0 +1,7 @@
+Collecting xgboost==2.0.2
+  Using cached xgboost-2.0.2-py3-none-manylinux2014_x86_64.whl.metadata (2.0 kB)
+Requirement already satisfied: numpy in /system/conda/miniconda3/envs/cloudspace/lib/python3.9/site-packages (from xgboost==2.0.2) (1.26.4)
+Requirement already satisfied: scipy in /system/conda/miniconda3/envs/cloudspace/lib/python3.9/site-packages (from xgboost==2.0.2) (1.13.1)
+Using cached xgboost-2.0.2-py3-none-manylinux2014_x86_64.whl (297.1 MB)
+Installing collected packages: xgboost
+Successfully installed xgboost-2.0.2
