@@ -1,3 +1,11 @@
+scenes/*.glb
+*.glb
+scenes/
+orientation_test/
+test_*/
+
+
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
