@@ -5,6 +5,7 @@ from PIL import Image
 from habitat_sim.nav import NavMeshSettings
 from habitat_sim.utils.common import quat_from_angle_axis, quat_from_coeffs, quat_to_coeffs
 import quaternion
+from sklearn.cluster import KMeans
 
 # This line explicitly tells the EGL system which GPU to use.
 os.environ["EGL_DEVICE_ID"] = os.environ.get("CUDA_VISIBLE_DEVICES", "0")
@@ -126,14 +127,16 @@ def create_human_rotations():
     # Get the base correction quaternion
     base_correction = correct_camera_orientation_quaternion()
     
-    # Define directions with 60-degree increments for a fuller panorama
+    # Define directions with 45-degree increments for a fuller panorama
     horizontal_directions = [
         (0, "dir_0"),
-        (60, "dir_60"),
-        (120, "dir_120"),
+        (45, "dir_45"),
+        (90, "dir_90"),
+        (135, "dir_135"),
         (180, "dir_180"),
-        (240, "dir_240"),
-        (300, "dir_300"),
+        (225, "dir_225"),
+        (270, "dir_270"),
+        (315, "dir_315"),
     ]
     
     # Define vertical angles (pitch)
@@ -266,36 +269,81 @@ for scene_path in SCENE_FILES:
     sample_heights.sort()
     # Use 5th percentile to find true ground floor (excludes furniture surfaces)
     floor_level = sample_heights[int(len(sample_heights) * 0.05)]
-    height_tolerance = 0.1  # Stricter tolerance to exclude furniture surfaces
+    height_tolerance = 0.04  # Stricter tolerance to exclude furniture surfaces
     
     print(f"Detected floor level: {floor_level:.3f}m")
     print(f"Eye level will be: {floor_level + AGENT_HEIGHT:.3f}m")
     
-    # Get navigable points at floor level
-    all_viewpoints = []
-    attempts = 0
-    max_attempts = NUM_VIEWPOINTS_PER_SCENE * 50
+    # --- Hybrid Grid-Clustering Approach to Find Room Centers ---
+    print("Using a hybrid grid-clustering approach to find room centers...")
     
-    while len(all_viewpoints) < NUM_VIEWPOINTS_PER_SCENE and attempts < max_attempts:
+    # 1. Sample a dense point cloud on the floor
+    dense_points = []
+    for _ in range(5000):  # Sample a large number of points for good coverage
         point = sim.pathfinder.get_random_navigable_point()
+        if abs(point[1] - floor_level) <= height_tolerance:
+            dense_points.append(point)
+            
+    if len(dense_points) < 50: # Need enough points to work with
+        print("Could not sample enough valid points. Skipping scene.")
+        continue
         
-        # Only accept points at floor level
-        if abs(point[1] - floor_level) > height_tolerance:
-            attempts += 1
-            continue
+    dense_points = np.array(dense_points)
+    
+    # 2. Create a grid and sort dense points into cells
+    grid_size = 1.5  # meters (reduced for better granularity)
+    min_points_per_cell = 2 # (reduced to be less strict)
+    min_bound = np.min(dense_points, axis=0)
+    
+    grid_cells = {}
+    for point in dense_points:
+        gx = int((point[0] - min_bound[0]) / grid_size)
+        gz = int((point[2] - min_bound[2]) / grid_size)
         
-        # Check minimum distance from existing points
-        if len(all_viewpoints) == 0:
-            all_viewpoints.append(point)
-        else:
-            min_distance = min([np.linalg.norm(point - existing) for existing in all_viewpoints])
-            if min_distance > 1.5:
-                all_viewpoints.append(point)
+        if (gx, gz) not in grid_cells:
+            grid_cells[(gx, gz)] = []
+        grid_cells[(gx, gz)].append(point)
         
-        attempts += 1
+    # 3. Get representative points from the center of each valid grid cell
+    grid_representatives = []
+    for cell_id, points_in_cell in grid_cells.items():
+        if len(points_in_cell) >= min_points_per_cell:
+            # Use the average of points in the cell as its representative
+            representative_point = np.mean(points_in_cell, axis=0)
+            grid_representatives.append(representative_point)
+    
+    if not grid_representatives:
+        print("No dense grid cells found. Cannot perform clustering. Skipping scene.")
+        continue
+        
+    grid_representatives = np.array(grid_representatives)
+    
+    # 4. Cluster the grid representatives to find rooms (Dynamically)
+    # Adjust number of rooms based on available representative points
+    num_rooms = min(4, len(grid_representatives))
+    print(f"Found {len(grid_representatives)} representative areas. Clustering into {num_rooms} rooms.")
+    
+    kmeans = KMeans(n_clusters=num_rooms, random_state=0, n_init=10)
+    kmeans.fit(grid_representatives)
+    
+    all_viewpoints = []
+    
+    # 5. Find the best viewpoint for each room (cluster)
+    for i in range(num_rooms):
+        # The cluster center is the ideal "room center"
+        room_center = kmeans.cluster_centers_[i]
+        
+        # Find the closest *navigable* point from the original dense sample
+        # to the calculated room center.
+        distances = np.linalg.norm(dense_points - room_center, axis=1)
+        closest_point_index = np.argmin(distances)
+        
+        # This closest navigable point is our final viewpoint
+        viewpoint = dense_points[closest_point_index]
+        all_viewpoints.append(viewpoint)
 
     if not all_viewpoints:
-        print(f"No valid floor-level viewpoints found for {scene_name}. Skipping.")
+        print(f"No valid viewpoints found with the grid method for {scene_name}. Skipping.")
         continue
     
     print(f"Found {len(all_viewpoints)} viewpoints")
