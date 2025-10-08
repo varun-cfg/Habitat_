@@ -104,21 +104,21 @@ def correct_camera_orientation_quaternion():
     to look forward horizontally. This is typically a 90-degree rotation
     around the X-axis.
     """
-    # 90-degree rotation around X-axis to tilt camera from down to forward
-    correction_angle = np.pi / 2  # 90 degrees
+    # -90-degree rotation around X-axis to tilt camera from down to forward
+    correction_angle = -np.pi / 2  # -90 degrees
     correction_axis = np.array([1, 0, 0])  # X-axis
     return quat_from_angle_axis(correction_angle, correction_axis)
 
 def create_human_rotations():
-    """Create natural human-like rotations with proper gravity alignment
+    """Create natural human-like rotations with proper gravity alignment.
     
     This function creates rotations that:
-    1. First correct any default camera orientation issues
-    2. Keep the camera upright (Y-axis aligned with world up)
-    3. Rotate horizontally (yaw around Y-axis)
-    4. Apply pitch while maintaining upright orientation
+    1. First correct any default camera orientation issues.
+    2. Keep the camera upright (Y-axis aligned with world up).
+    3. Rotate horizontally (yaw around Y-axis) in 60-degree increments.
+    4. Apply pitch while maintaining upright orientation.
     
-    Modified to only generate "back" direction images.
+    Returns 18 total orientations: 6 directions × 3 vertical angles.
     """
     rotations = []
     rotation_names = []
@@ -126,33 +126,45 @@ def create_human_rotations():
     # Get the base correction quaternion
     base_correction = correct_camera_orientation_quaternion()
     
-    # Only back direction (180 degrees)
-    yaw_angle = 180
-    yaw_name = "back"
+    # Define directions with 60-degree increments for a fuller panorama
+    horizontal_directions = [
+        (0, "dir_0"),
+        (60, "dir_60"),
+        (120, "dir_120"),
+        (180, "dir_180"),
+        (240, "dir_240"),
+        (300, "dir_300"),
+    ]
     
-    # Level view (pitch = 0) - back_level
-    yaw_rad = np.radians(yaw_angle)
-    yaw_quat = quat_from_angle_axis(yaw_rad, np.array([0, 1, 0]))
-    combined_quat = yaw_quat * base_correction
-    rotations.append(combined_quat)
-    rotation_names.append(f"{yaw_name}_level")
+    # Define vertical angles (pitch)
+    pitch_angles = [
+        (0, "level"),
+        (15, "up"),
+        (-15, "down")
+    ]
     
-    # Add pitch variants for back direction
-    pitch_angles = [15, -15]  # Looking up and down
-    pitch_names = ["up", "down"]
-    
-    for pitch_deg, pitch_name in zip(pitch_angles, pitch_names):
-        pitch_rad = np.radians(pitch_deg)
-        
-        # Create individual rotations
-        yaw_quat = quat_from_angle_axis(yaw_rad, np.array([0, 1, 0]))
-        pitch_quat = quat_from_angle_axis(pitch_rad, np.array([1, 0, 0]))
-        
-        # Combine: base correction, then yaw, then pitch
-        combined_quat = yaw_quat * pitch_quat * base_correction
-        
-        rotations.append(combined_quat)
-        rotation_names.append(f"{yaw_name}_{pitch_name}")
+    # Generate all combinations of direction and pitch
+    for yaw_angle, yaw_name in horizontal_directions:
+        for pitch_deg, pitch_name in pitch_angles:
+            # Convert angles to radians
+            yaw_rad = np.radians(yaw_angle)
+            pitch_rad = np.radians(pitch_deg)
+            
+            # Create individual rotations
+            yaw_quat = quat_from_angle_axis(yaw_rad, np.array([0, 1, 0]))
+            pitch_quat = quat_from_angle_axis(pitch_rad, np.array([1, 0, 0]))
+            
+            # Combine rotations:
+            # The order of multiplication is crucial for correctness.
+            # To achieve a gravity-aligned rotation (no rolling):
+            # 1. Apply the base correction to fix the camera's default orientation.
+            # 2. Apply the yaw rotation to turn horizontally.
+            # 3. Apply the pitch rotation to look up or down.
+            # The correct order is: yaw * pitch * correction
+            combined_quat = base_correction * yaw_quat * pitch_quat
+            
+            rotations.append(combined_quat)
+            rotation_names.append(f"{yaw_name}_{pitch_name}")
     
     return rotations, rotation_names
 
@@ -179,6 +191,20 @@ def verify_camera_orientation(agent, expected_direction_name):
     if forward_world[1] < -0.7:  # Y negative means looking down
         print(f"  ⚠ Camera looking DOWN! Forward vector: {forward_world}")
         return False
+    
+    # Verify direction based on name
+    direction_name = expected_direction_name.split("_")[0]
+    x_comp, z_comp = forward_world[0], forward_world[2]
+    
+    # Check if camera is facing the expected cardinal direction
+    if direction_name == "front" and z_comp > -0.5:  # Should be looking in -z direction
+        print(f"  ⚠ Not looking front correctly! Z: {z_comp:.3f}")
+    elif direction_name == "back" and z_comp < 0.5:  # Should be looking in +z direction
+        print(f"  ⚠ Not looking back correctly! Z: {z_comp:.3f}")
+    elif direction_name == "right" and x_comp < 0.5:  # Should be looking in +x direction
+        print(f"  ⚠ Not looking right correctly! X: {x_comp:.3f}")
+    elif direction_name == "left" and x_comp > -0.5:  # Should be looking in -x direction
+        print(f"  ⚠ Not looking left correctly! X: {x_comp:.3f}")
     
     return True
 
@@ -273,6 +299,7 @@ for scene_path in SCENE_FILES:
         continue
     
     print(f"Found {len(all_viewpoints)} viewpoints")
+    print("Capturing 12 images per viewpoint (4 directions × 3 vertical angles)...")
 
     # Create human-like rotations with correction for camera orientation
     human_rotations, rotation_names = create_human_rotations()
@@ -285,6 +312,7 @@ for scene_path in SCENE_FILES:
 
     for i, floor_point in enumerate(all_viewpoints):
         print(f"\nViewpoint {i+1}/{len(all_viewpoints)}")
+        viewpoint_images_saved = 0
         
         for j, (rotation, rotation_name) in enumerate(zip(human_rotations, rotation_names)):
             # Set agent position at eye height
@@ -298,12 +326,11 @@ for scene_path in SCENE_FILES:
             agent_state.sensor_states = {}
             agent.set_state(agent_state)
             
-            # Verify orientation for first few captures
-            if i == 0 and j < 3:
+            # Verify orientation for first viewpoint only (to reduce output)
+            if i == 0 and j < 12:  # Check all 12 orientations for first viewpoint
                 is_correct = verify_camera_orientation(agent, rotation_name)
                 if not is_correct:
                     orientation_warnings += 1
-                    print(f"  Orientation check failed for {rotation_name}")
             
             try:
                 observations = sim.get_sensor_observations()
@@ -321,18 +348,25 @@ for scene_path in SCENE_FILES:
                 
                 # Validate and save the image
                 if is_valid_image(rgb_array):
+                    # Create a filename-friendly coordinate string
+                    coord_str = f"pos_{floor_point[0]:.2f}_{floor_point[1]:.2f}_{floor_point[2]:.2f}"
+                    
                     rgb_img = Image.fromarray(rgb_array.astype(np.uint8), "RGB")
-                    rgb_filepath = os.path.join(output_dir_for_scene, f"point_{i:02d}_{rotation_name}.png")
+                    rgb_filepath = os.path.join(output_dir_for_scene, f"{coord_str}_{rotation_name}.png")
                     rgb_img.save(rgb_filepath)
                     scene_valid_images += 1
                     total_valid_images += 1
+                    viewpoint_images_saved += 1
                     
-                    if scene_valid_images <= 3:
+                    # Only print first few to avoid cluttering output
+                    if viewpoint_images_saved <= 4 or viewpoint_images_saved % 4 == 0:
                         print(f"  ✓ Saved: {rotation_name}")
                     
             except Exception as e:
-                print(f"  ERROR: {e}")
+                print(f"  ERROR processing {rotation_name}: {e}")
                 continue
+        
+        print(f"  Viewpoint complete: {viewpoint_images_saved}/12 images saved")
     
     if orientation_warnings > 0:
         print(f"\n⚠ WARNING: {orientation_warnings} orientation issues detected!")
@@ -341,6 +375,7 @@ for scene_path in SCENE_FILES:
     
     print(f"\n✅ Scene {scene_name} complete!")
     print(f"   Valid images: {scene_valid_images}/{scene_total_attempts}")
+    print(f"   Expected: {len(all_viewpoints) * 12} images (12 per viewpoint)")
 
 if sim is not None:
     sim.close()
@@ -348,10 +383,14 @@ if sim is not None:
 print(f"\n{'='*60}")
 print(f"🎉 All scenes processed!")
 print(f"   Total valid images: {total_valid_images}")
+print(f"   (4 directions × 3 vertical angles = 12 images per viewpoint)")
 print(f"{'='*60}")
 
 # Additional debugging note
-print("\nNOTE: If images are still showing top-down view, try adjusting:")
+print("\nNOTE: If images are still showing incorrect orientations:")
 print("  1. The correction angle in correct_camera_orientation_quaternion()")
 print("  2. Try negative angles (-np.pi/2) if the rotation is opposite")
 print("  3. Try rotating around Z-axis instead of X-axis")
+print("\nOutput naming convention:")
+print("  - Directions: front (0°), right (90°), back (180°), left (270°)")
+print("  - Vertical angles: level (0°), up (15°), down (-15°)")
