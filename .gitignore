@@ -1,6 +1,9 @@
+# Large scene files (don't upload to git)
 scenes/*.glb
 *.glb
 scenes/
+
+# Test directories (local only)
 orientation_test/
 test_*/
 
